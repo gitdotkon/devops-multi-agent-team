@@ -1,0 +1,203 @@
+# 示例工作流：生产环境部署
+# 演示多 Agent 协作完成生产环境部署
+
+version: "1.0"
+workflow:
+  name: "deploy-production"
+  description: "生产环境部署完整流程"
+  type: "multi-agent"
+  
+# =============================================================================
+# 参与 Agent
+# =============================================================================
+agents:
+  - "manager"     # 总协调
+  - "security"    # 安全扫描
+  - "cicd"        # 部署执行
+  - "sre"         # 监控验证
+
+# =============================================================================
+# 工作流阶段
+# =============================================================================
+stages:
+  - name: "准备阶段"
+    steps:
+      - name: "需求确认"
+        agent: "manager"
+        action: "parse_request"
+        description: "解析部署需求，确认版本、环境、策略"
+        
+      - name: "前置检查"
+        agent: "cicd"
+        action: "pre_deployment_check"
+        description: "检查环境状态、资源可用性、依赖服务"
+        
+      - name: "安全检查"
+        agent: "security"
+        action: "pre_deployment_security"
+        description: "检查安全策略、合规要求"
+
+  - name: "构建阶段"
+    steps:
+      - name: "代码构建"
+        agent: "cicd"
+        action: "build"
+        description: "拉取代码，执行构建"
+        
+      - name: "单元测试"
+        agent: "cicd"
+        action: "unit_test"
+        description: "运行单元测试"
+        
+      - name: "镜像构建"
+        agent: "cicd"
+        action: "build_image"
+        description: "构建 Docker 镜像"
+        
+      - name: "安全扫描"
+        agent: "security"
+        action: "image_scan"
+        description: "扫描镜像漏洞，确保无高危漏洞"
+        conditions:
+          - "vulnerability_count.critical == 0"
+          - "vulnerability_count.high == 0"
+
+  - name: "部署阶段"
+    steps:
+      - name: "部署审批"
+        agent: "manager"
+        action: "approval"
+        description: "获取部署审批"
+        approval_required: true
+        
+      - name: "执行部署"
+        agent: "cicd"
+        action: "deploy"
+        description: "执行 Kubernetes 部署"
+        strategy: "rolling_update"
+        
+      - name: "配置更新"
+        agent: "infra"
+        action: "update_config"
+        description: "更新相关配置（负载均衡、DNS 等）"
+
+  - name: "验证阶段"
+    steps:
+      - name: "健康检查"
+        agent: "sre"
+        action: "health_check"
+        description: "检查服务健康状态"
+        
+      - name: "功能验证"
+        agent: "cicd"
+        action: "smoke_test"
+        description: "运行冒烟测试"
+        
+      - name: "监控验证"
+        agent: "sre"
+        action: "monitoring_check"
+        description: "验证监控指标正常"
+        
+      - name: "性能验证"
+        agent: "sre"
+        action: "performance_check"
+        description: "验证性能指标符合 SLO"
+
+  - name: "收尾阶段"
+    steps:
+      - name: "通知发布"
+        agent: "manager"
+        action: "notify"
+        description: "通知相关方部署完成"
+        
+      - name: "文档更新"
+        agent: "cicd"
+        action: "update_docs"
+        description: "更新部署记录和文档"
+        
+      - name: "总结报告"
+        agent: "manager"
+        action: "generate_report"
+        description: "生成部署总结报告"
+
+# =============================================================================
+# 回滚策略
+# =============================================================================
+rollback:
+  enabled: true
+  triggers:
+    - "health_check_failed"
+    - "smoke_test_failed"
+    - "error_rate_high"
+    - "latency_slo_breach"
+    
+  strategy: "automatic"
+  max_attempts: 1
+  
+  steps:
+    - name: "停止部署"
+      agent: "cicd"
+      action: "stop_deployment"
+      
+    - name: "执行回滚"
+      agent: "cicd"
+      action: "rollback"
+      target: "previous_stable_version"
+      
+    - name: "验证回滚"
+      agent: "sre"
+      action: "verify_rollback"
+      
+    - name: "通知回滚"
+      agent: "manager"
+      action: "notify_rollback"
+
+# =============================================================================
+# 通知配置
+# =============================================================================
+notifications:
+  channels:
+    - type: "slack"
+      channel: "#deployments"
+      events: ["start", "success", "failure", "rollback"]
+      
+    - type: "dingtalk"
+      webhook: "DINGTALK_WEBHOOK_URL"
+      events: ["success", "failure", "rollback"]
+      
+    - type: "email"
+      recipients: ["devops@company.com", "team@company.com"]
+      events: ["failure", "rollback"]
+
+# =============================================================================
+# 超时配置
+# =============================================================================
+timeouts:
+  total_workflow: "2h"
+  build_stage: "30m"
+  deploy_stage: "15m"
+  verify_stage: "15m"
+  
+# =============================================================================
+# 成功标准
+# =============================================================================
+success_criteria:
+  - "所有阶段完成"
+  - "健康检查通过"
+  - "冒烟测试通过"
+  - "错误率 < 0.1%"
+  - "P95 延迟 < 200ms"
+  - "无 P0/P1 告警"
+
+# =============================================================================
+# 输出物
+# =============================================================================
+artifacts:
+  - name: "部署报告"
+    path: "./artifacts/deploy-report-{{timestamp}}.md"
+    
+  - name: "构建日志"
+    path: "./artifacts/build-logs-{{timestamp}}.log"
+    
+  - name: "测试结果"
+    path: "./artifacts/test-results-{{timestamp}}.json"

@@ -1,0 +1,134 @@
+# Kubernetes Deployment 模板
+# 标准应用部署配置
+
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ .appName }}
+  namespace: {{ .namespace }}
+  labels:
+    app: {{ .appName }}
+    version: {{ .version }}
+    environment: {{ .environment }}
+spec:
+  replicas: {{ .replicas }}
+  selector:
+    matchLabels:
+      app: {{ .appName }}
+  template:
+    metadata:
+      labels:
+        app: {{ .appName }}
+        version: {{ .version }}
+      annotations:
+        prometheus.io/scrape: "true"
+        prometheus.io/port: "{{ .metricsPort }}"
+    spec:
+      serviceAccountName: {{ .serviceAccount | default "default" }}
+      containers:
+        - name: {{ .appName }}
+          image: {{ .image }}
+          imagePullPolicy: {{ .imagePullPolicy | default "Always" }}
+          ports:
+            - name: http
+              containerPort: {{ .containerPort }}
+              protocol: TCP
+            - name: metrics
+              containerPort: {{ .metricsPort }}
+              protocol: TCP
+          resources:
+            requests:
+              memory: "{{ .memoryRequest | default "256Mi" }}"
+              cpu: "{{ .cpuRequest | default "100m" }}"
+            limits:
+              memory: "{{ .memoryLimit | default "512Mi" }}"
+              cpu: "{{ .cpuLimit | default "500m" }}"
+          env:
+            - name: ENVIRONMENT
+              value: "{{ .environment }}"
+            - name: APP_NAME
+              value: "{{ .appName }}"
+          {{- if .envFrom }}
+          envFrom:
+            {{- range .envFrom }}
+            - configMapRef:
+                name: {{ . }}
+            {{- end }}
+          {{- end }}
+          livenessProbe:
+            httpGet:
+              path: /health/live
+              port: http
+            initialDelaySeconds: 30
+            periodSeconds: 10
+            timeoutSeconds: 5
+            failureThreshold: 3
+          readinessProbe:
+            httpGet:
+              path: /health/ready
+              port: http
+            initialDelaySeconds: 10
+            periodSeconds: 5
+            timeoutSeconds: 3
+            failureThreshold: 3
+          volumeMounts:
+            - name: logs
+              mountPath: /var/log/app
+      volumes:
+        - name: logs
+          emptyDir: {}
+      {{- if .nodeSelector }}
+      nodeSelector:
+        {{- toYaml .nodeSelector | nindent 8 }}
+      {{- end }}
+      {{- if .tolerations }}
+      tolerations:
+        {{- toYaml .tolerations | nindent 8 }}
+      {{- end }}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ .appName }}
+  namespace: {{ .namespace }}
+  labels:
+    app: {{ .appName }}
+spec:
+  type: {{ .serviceType | default "ClusterIP" }}
+  ports:
+    - name: http
+      port: {{ .servicePort | default 80 }}
+      targetPort: http
+      protocol: TCP
+    - name: metrics
+      port: {{ .metricsPort }}
+      targetPort: metrics
+      protocol: TCP
+  selector:
+    app: {{ .appName }}
+---
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: {{ .appName }}-hpa
+  namespace: {{ .namespace }}
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: {{ .appName }}
+  minReplicas: {{ .minReplicas | default 2 }}
+  maxReplicas: {{ .maxReplicas | default 10 }}
+  metrics:
+    - type: Resource
+      resource:
+        name: cpu
+        target:
+          type: Utilization
+          averageUtilization: 70
+    - type: Resource
+      resource:
+        name: memory
+        target:
+          type: Utilization
+          averageUtilization: 80

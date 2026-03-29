@@ -1,0 +1,267 @@
+# 示例工作流：应急响应
+# 演示多 Agent 协作处理生产事件
+
+version: "1.0"
+workflow:
+  name: "emergency-response"
+  description: "生产事件应急响应流程"
+  type: "multi-agent"
+  priority: "critical"
+
+# =============================================================================
+# 参与 Agent
+# =============================================================================
+agents:
+  - "manager"     # 总协调
+  - "sre"         # 事件响应主导
+  - "infra"       # 基础设施支持
+  - "security"    # 安全事件支持
+  - "cicd"        # 部署/回滚支持
+
+# =============================================================================
+# 事件分级
+# =============================================================================
+severity_levels:
+  P0:
+    description: "核心服务完全不可用"
+    response_time: "5 分钟"
+    notification: ["pager", "phone", "slack", "email"]
+    escalation: "立即升级到 CTO"
+    
+  P1:
+    description: "核心服务性能严重下降"
+    response_time: "15 分钟"
+    notification: ["phone", "slack", "email"]
+    escalation: "30 分钟未解决升级到部门负责人"
+    
+  P2:
+    description: "非核心服务问题"
+    response_time: "1 小时"
+    notification: ["slack", "email"]
+    escalation: "2 小时未解决升级到团队负责人"
+    
+  P3:
+    description: "轻微问题"
+    response_time: "24 小时"
+    notification: ["email"]
+    escalation: "无"
+
+# =============================================================================
+# 响应流程
+# =============================================================================
+stages:
+  - name: "检测与告警"
+    steps:
+      - name: "告警接收"
+        agent: "sre"
+        action: "receive_alert"
+        description: "接收监控告警"
+        
+      - name: "事件分级"
+        agent: "sre"
+        action: "classify_incident"
+        description: "根据影响范围确定事件级别"
+        
+      - name: "通知相关人员"
+        agent: "manager"
+        action: "notify_team"
+        description: "通知值班人员和相关团队"
+        
+      - name: "创建事件工单"
+        agent: "manager"
+        action: "create_incident_ticket"
+        description: "创建事件追踪工单"
+
+  - name: "初步诊断"
+    steps:
+      - name: "症状收集"
+        agent: "sre"
+        action: "gather_symptoms"
+        description: "收集故障现象和影响范围"
+        
+      - name: "指标分析"
+        agent: "sre"
+        action: "analyze_metrics"
+        description: "分析监控指标，定位异常"
+        
+      - name: "日志分析"
+        agent: "sre"
+        action: "analyze_logs"
+        description: "分析相关日志，查找错误"
+        
+      - name: "初步判断"
+        agent: "sre"
+        action: "initial_assessment"
+        description: "形成初步诊断结论"
+
+  - name: "缓解措施"
+    steps:
+      - name: "制定缓解方案"
+        agent: "sre"
+        action: "create_mitigation_plan"
+        description: "制定临时缓解措施"
+        
+      - name: "方案审批"
+        agent: "manager"
+        action: "approve_mitigation"
+        description: "审批缓解方案（P0/P1 需要）"
+        
+      - name: "执行缓解"
+        agent: "cicd"
+        action: "execute_mitigation"
+        description: "执行缓解措施（回滚/重启/扩容等）"
+        
+      - name: "验证缓解"
+        agent: "sre"
+        action: "verify_mitigation"
+        description: "验证缓解措施效果"
+
+  - name: "根因分析"
+    steps:
+      - name: "深入调查"
+        agent: "sre"
+        action: "deep_investigation"
+        description: "深入调查根本原因"
+        
+      - name: "基础设施检查"
+        agent: "infra"
+        action: "infra_check"
+        description: "检查基础设施状态"
+        
+      - name: "安全检查"
+        agent: "security"
+        action: "security_check"
+        description: "排除安全事件可能"
+        
+      - name: "根因确认"
+        agent: "sre"
+        action: "confirm_root_cause"
+        description: "确认根本原因"
+
+  - name: "恢复与验证"
+    steps:
+      - name: "制定恢复方案"
+        agent: "sre"
+        action: "create_recovery_plan"
+        description: "制定永久修复方案"
+        
+      - name: "执行恢复"
+        agent: "cicd"
+        action: "execute_recovery"
+        description: "执行恢复操作"
+        
+      - name: "全面验证"
+        agent: "sre"
+        action: "comprehensive_verify"
+        description: "全面验证服务恢复"
+        
+      - name: "监控观察"
+        agent: "sre"
+        action: "monitoring_watch"
+        description: "持续监控观察"
+
+  - name: "事后总结"
+    steps:
+      - name: "编写事件报告"
+        agent: "sre"
+        action: "write_incident_report"
+        description: "编写详细事件报告"
+        
+      - name: "5 Why 分析"
+        agent: "manager"
+        action: "five_whys"
+        description: "进行 5 Why 根因分析"
+        
+      - name: "改进项追踪"
+        agent: "manager"
+        action: "track_action_items"
+        description: "创建并追踪改进项"
+        
+      - name: "经验分享"
+        agent: "manager"
+        action: "share_learnings"
+        description: "团队内部分享经验"
+
+# =============================================================================
+# 沟通模板
+# =============================================================================
+communication_templates:
+  initial_notification: |
+    【事件通知】
+    级别：{{severity}}
+    服务：{{service}}
+    影响：{{impact}}
+    时间：{{timestamp}}
+    状态：调查中
+    负责人：{{owner}}
+    下次更新：{{next_update}}
+    
+  status_update: |
+    【事件更新】
+    级别：{{severity}}
+    服务：{{service}}
+    当前状态：{{status}}
+    已采取措施：{{actions}}
+    下一步计划：{{next_steps}}
+    预计恢复：{{eta}}
+    
+  resolution_notification: |
+    【事件解决】
+    级别：{{severity}}
+    服务：{{service}}
+    状态：已恢复
+    根本原因：{{root_cause}}
+    解决措施：{{resolution}}
+    事件报告：{{report_link}}
+    改进项：{{action_items}}
+
+# =============================================================================
+# 升级策略
+# =============================================================================
+escalation:
+  P0:
+    - time: "0m"
+      action: "通知 On-Call"
+    - time: "5m"
+      action: "通知团队负责人"
+    - time: "15m"
+      action: "通知部门负责人"
+    - time: "30m"
+      action: "通知 CTO"
+      
+  P1:
+    - time: "0m"
+      action: "通知 On-Call"
+    - time: "15m"
+      action: "通知团队负责人"
+    - time: "30m"
+      action: "通知部门负责人"
+      
+  P2:
+    - time: "0m"
+      action: "通知 On-Call"
+    - time: "1h"
+      action: "通知团队负责人"
+
+# =============================================================================
+# 成功标准
+# =============================================================================
+success_criteria:
+  - "服务恢复正常"
+  - "监控指标正常"
+  - "用户影响消除"
+  - "事件报告完成"
+  - "改进项已创建"
+
+# =============================================================================
+# 输出物
+# =============================================================================
+artifacts:
+  - name: "事件时间线"
+    path: "./artifacts/incident-timeline-{{incident_id}}.md"
+    
+  - name: "事件报告"
+    path: "./artifacts/incident-report-{{incident_id}}.md"
+    
+  - name: "改进项列表"
+    path: "./artifacts/action-items-{{incident_id}}.md"

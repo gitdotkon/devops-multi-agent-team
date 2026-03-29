@@ -1,0 +1,20 @@
+{
+  "name": "devops-team",
+  "version": "1.0.0",
+  "description": "一个基于 AI Agent 的云 DevOps 多 Agent 协作系统，通过专业化的 Agent 分工协作，实现基础设施管理、安全审计、CI/CD 自动化、监控与稳定性保障等 DevOps 全流程。",
+  "main": "devops-cli.js",
+  "directories": {
+    "example": "examples",
+    "test": "tests"
+  },
+  "scripts": {
+    "test": "echo \"Error: no test specified\" && exit 1"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "type": "commonjs",
+  "dependencies": {
+    "js-yaml": "^4.1.1"
+  }
+}

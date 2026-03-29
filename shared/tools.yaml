@@ -1,0 +1,243 @@
+# 共享工具配置 - DevOps 多 Agent 团队
+# 所有 Agent 可以使用的工具定义和权限
+
+version: "1.0"
+shared: true
+
+# =============================================================================
+# 云基础设施工具
+# =============================================================================
+cloud_providers:
+  aliyun:
+    enabled: true
+    cli: "aliyun"
+    auth_method: "ak_sk"  # 或 "sts", "rrsa"
+    regions:
+      - "cn-beijing"
+      - "cn-shanghai"
+      - "cn-hangzhou"
+      - "cn-shenzhen"
+    services:
+      - "ecs"
+      - "vpc"
+      - "rds"
+      - "oss"
+      - "slb"
+      - "ram"
+      - "dns"
+      - "cs"  # 容器服务
+      
+  aws:
+    enabled: true
+    cli: "aws"
+    auth_method: "profile"
+    regions:
+      - "ap-northeast-1"
+      - "us-west-2"
+    services:
+      - "ec2"
+      - "vpc"
+      - "rds"
+      - "s3"
+      - "elb"
+      - "iam"
+      - "eks"
+
+# =============================================================================
+# 容器与编排工具
+# =============================================================================
+container_tools:
+  kubernetes:
+    enabled: true
+    cli: "kubectl"
+    contexts:
+      - name: "production"
+        cluster: "prod-cluster"
+        namespace: "default"
+      - name: "staging"
+        cluster: "staging-cluster"
+        namespace: "default"
+      - name: "development"
+        cluster: "dev-cluster"
+        namespace: "default"
+    
+  docker:
+    enabled: true
+    cli: "docker"
+    registries:
+      - "registry.cn-hangzhou.aliyuncs.com"
+      - "docker.io"
+      
+  helm:
+    enabled: true
+    cli: "helm"
+    repositories:
+      - name: "stable"
+        url: "https://charts.helm.sh/stable"
+      - name: "bitnami"
+        url: "https://charts.bitnami.com/bitnami"
+
+# =============================================================================
+# CI/CD 工具
+# =============================================================================
+cicd_tools:
+  github_actions:
+    enabled: true
+    api_endpoint: "https://api.github.com"
+    workflows_dir: ".github/workflows"
+    
+  gitlab_ci:
+    enabled: false
+    api_endpoint: "https://gitlab.com/api/v4"
+    
+  jenkins:
+    enabled: false
+    api_endpoint: "http://jenkins.local:8080"
+    auth_method: "token"
+
+# =============================================================================
+# 监控与日志工具
+# =============================================================================
+monitoring_tools:
+  prometheus:
+    enabled: true
+    endpoint: "http://prometheus.local:9090"
+    api_path: "/api/v1"
+    
+  grafana:
+    enabled: true
+    endpoint: "http://grafana.local:3000"
+    api_key_env: "GRAFANA_API_KEY"
+    
+  alertmanager:
+    enabled: true
+    endpoint: "http://alertmanager.local:9093"
+    
+  elasticsearch:
+    enabled: true
+    endpoint: "http://elasticsearch.local:9200"
+    indices:
+      - "logs-*"
+      - "metrics-*"
+
+# =============================================================================
+# 安全工具
+# =============================================================================
+security_tools:
+  trivy:
+    enabled: true
+    cli: "trivy"
+    scan_types:
+      - "image"
+      - "filesystem"
+      - "config"
+      
+  sonarqube:
+    enabled: true
+    endpoint: "http://sonarqube.local:9000"
+    api_token_env: "SONAR_TOKEN"
+    
+  vault:
+    enabled: true
+    endpoint: "http://vault.local:8200"
+    auth_method: "approle"
+    
+  openscap:
+    enabled: false
+    cli: "oscap"
+
+# =============================================================================
+# 基础设施即代码工具
+# =============================================================================
+iac_tools:
+  terraform:
+    enabled: true
+    cli: "terraform"
+    version: ">= 1.5.0"
+    backends:
+      - type: "oss"
+        bucket: "tf-state-bucket"
+        prefix: "prod"
+      - type: "s3"
+        bucket: "terraform-state"
+        region: "us-west-2"
+        
+  ansible:
+    enabled: true
+    cli: "ansible"
+    config_path: "./ansible.cfg"
+    inventory_path: "./inventory"
+    
+  pulumi:
+    enabled: false
+    cli: "pulumi"
+
+# =============================================================================
+# 通用工具
+# =============================================================================
+common_tools:
+  git:
+    enabled: true
+    cli: "git"
+    
+  jq:
+    enabled: true
+    cli: "jq"
+    
+  yq:
+    enabled: true
+    cli: "yq"
+    
+  curl:
+    enabled: true
+    cli: "curl"
+    
+  ssh:
+    enabled: true
+    cli: "ssh"
+    config_path: "~/.ssh/config"
+
+# =============================================================================
+# 通知与协作工具
+# =============================================================================
+notification_tools:
+  slack:
+    enabled: true
+    webhook_env: "SLACK_WEBHOOK_URL"
+    channels:
+      - "#devops-alerts"
+      - "#incident-response"
+      
+  dingtalk:
+    enabled: true
+    webhook_env: "DINGTALK_WEBHOOK_URL"
+    
+  email:
+    enabled: true
+    smtp_host: "smtp.company.com"
+    smtp_port: 587
+    from_address: "devops@company.com"
+
+# =============================================================================
+# 工具使用策略
+# =============================================================================
+policies:
+  # 所有工具调用的超时设置 (秒)
+  default_timeout: 300
+  
+  # 重试策略
+  retry:
+    max_attempts: 3
+    backoff_multiplier: 2
+    initial_delay: 5
+    
+  # 并发限制
+  concurrency:
+    max_parallel_operations: 5
+    max_api_calls_per_minute: 60
+    
+  # 审计日志
+  audit:
+    enabled: true
+    log_file: "./logs/tool-audit.log"
+    log_level: "info"
