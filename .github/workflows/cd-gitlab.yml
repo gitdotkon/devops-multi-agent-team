@@ -1,0 +1,297 @@
+# =============================================================================
+# CD 流水线 - 部署 GitLab 到阿里云
+# =============================================================================
+# 触发条件：
+# - CI 成功后自动部署到开发环境
+# - 手动触发部署到测试/生产环境
+# =============================================================================
+
+name: CD - Deploy GitLab to Aliyun
+
+on:
+  # CI 成功后自动部署开发环境
+  workflow_run:
+    workflows: ["CI - Continuous Integration"]
+    types: [completed]
+    branches: [main, master]
+
+  # 手动触发部署
+  workflow_dispatch:
+    inputs:
+      environment:
+        description: '部署环境'
+        required: true
+        default: 'test'
+        type: choice
+        options:
+          - dev
+          - test
+          - production
+      gitlab_version:
+        description: 'GitLab 版本 (留空使用最新版)'
+        required: false
+        default: ''
+      deployment_strategy:
+        description: '部署策略'
+        required: true
+        default: 'rolling'
+        type: choice
+        options:
+          - recreate
+          - rolling
+          - blue-green
+
+# 环境变量
+env:
+  ALIYUN_REGION: cn-hangzhou
+  TF_VAR_region: cn-hangzhou
+
+jobs:
+  # ---------------------------------------------------------------------------
+  # 1. 部署前检查
+  # ---------------------------------------------------------------------------
+  pre-check:
+    name: Pre-deployment Check
+    runs-on: ubuntu-latest
+    outputs:
+      gitlab_version: ${{ steps.version.outputs.version }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Determine GitLab version
+        id: version
+        run: |
+          if [ -n "${{ github.event.inputs.gitlab_version }}" ]; then
+            echo "version=${{ github.event.inputs.gitlab_version }}" >> $GITHUB_OUTPUT
+          else
+            # 使用最新版
+            echo "version=latest" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Validate deployment target
+        run: |
+          echo "部署环境：${{ github.event.inputs.environment || 'test' }}"
+          echo "GitLab 版本：${{ steps.version.outputs.version }}"
+          echo "部署策略：${{ github.event.inputs.deployment_strategy || 'rolling' }}"
+
+  # ---------------------------------------------------------------------------
+  # 2. 配置阿里云凭证
+  # ---------------------------------------------------------------------------
+  configure-aliyun:
+    name: Configure Aliyun Credentials
+    runs-on: ubuntu-latest
+    needs: [pre-check]
+    environment: ${{ github.event.inputs.environment || 'test' }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Aliyun CLI
+        uses: zhanglongfei001/aliyun-cli-action@v1
+        with:
+          aliyun_access_key_id: ${{ secrets.ALIYUN_ACCESS_KEY_ID }}
+          aliyun_access_key_secret: ${{ secrets.ALIYUN_ACCESS_KEY_SECRET }}
+          aliyun_region: ${{ env.ALIYUN_REGION }}
+
+      - name: Verify Aliyun login
+        run: aliyun configure list
+
+  # ---------------------------------------------------------------------------
+  # 3. 初始化 Terraform
+  # ---------------------------------------------------------------------------
+  terraform-init:
+    name: Initialize Terraform
+    runs-on: ubuntu-latest
+    needs: [configure-aliyun]
+    environment: ${{ github.event.inputs.environment || 'test' }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: 1.6.0
+
+      - name: Setup Aliyun CLI
+        uses: zhanglongfei001/aliyun-cli-action@v1
+        with:
+          aliyun_access_key_id: ${{ secrets.ALIYUN_ACCESS_KEY_ID }}
+          aliyun_access_key_secret: ${{ secrets.ALIYUN_ACCESS_KEY_SECRET }}
+
+      - name: Terraform Init
+        run: |
+          terraform init \
+            -backend-config="access_key=${{ secrets.ALIYUN_ACCESS_KEY_ID }}" \
+            -backend-config="secret_key=${{ secrets.ALIYUN_ACCESS_KEY_SECRET }}"
+        working-directory: terraform
+        env:
+          ALIYUN_ACCESS_KEY_ID: ${{ secrets.ALIYUN_ACCESS_KEY_ID }}
+          ALIYUN_ACCESS_KEY_SECRET: ${{ secrets.ALIYUN_ACCESS_KEY_SECRET }}
+
+  # ---------------------------------------------------------------------------
+  # 4. 部署基础设施
+  # ---------------------------------------------------------------------------
+  deploy-infrastructure:
+    name: Deploy Infrastructure
+    runs-on: ubuntu-latest
+    needs: [terraform-init]
+    environment: ${{ github.event.inputs.environment || 'test' }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v3
+
+      - name: Setup Aliyun CLI
+        uses: zhanglongfei001/aliyun-cli-action@v1
+        with:
+          aliyun_access_key_id: ${{ secrets.ALIYUN_ACCESS_KEY_ID }}
+          aliyun_access_key_secret: ${{ secrets.ALIYUN_ACCESS_KEY_SECRET }}
+
+      - name: Terraform Plan
+        id: plan
+        run: |
+          terraform plan -out=tfplan -var="environment=${{ github.event.inputs.environment || 'test' }}"
+        working-directory: terraform
+        env:
+          ALIYUN_ACCESS_KEY_ID: ${{ secrets.ALIYUN_ACCESS_KEY_ID }}
+          ALIYUN_ACCESS_KEY_SECRET: ${{ secrets.ALIYUN_ACCESS_KEY_SECRET }}
+
+      - name: Upload Terraform plan
+        uses: actions/upload-artifact@v4
+        with:
+          name: tfplan
+          path: terraform/tfplan
+          retention-days: 1
+
+      - name: Terraform Apply
+        run: |
+          terraform apply -auto-approve tfplan
+        working-directory: terraform
+        env:
+          ALIYUN_ACCESS_KEY_ID: ${{ secrets.ALIYUN_ACCESS_KEY_ID }}
+          ALIYUN_ACCESS_KEY_SECRET: ${{ secrets.ALIYUN_ACCESS_KEY_SECRET }}
+
+      - name: Output infrastructure info
+        run: |
+          terraform output -json > /tmp/infrastructure-output.json
+        working-directory: terraform
+
+      - name: Upload infrastructure output
+        uses: actions/upload-artifact@v4
+        with:
+          name: infrastructure-output
+          path: terraform/infrastructure-output.json
+          retention-days: 7
+
+  # ---------------------------------------------------------------------------
+  # 5. 部署 GitLab
+  # ---------------------------------------------------------------------------
+  deploy-gitlab:
+    name: Deploy GitLab
+    runs-on: ubuntu-latest
+    needs: [deploy-infrastructure]
+    environment: ${{ github.event.inputs.environment || 'test' }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Download infrastructure output
+        uses: actions/download-artifact@v4
+        with:
+          name: infrastructure-output
+          path: terraform/
+
+      - name: Setup Aliyun CLI
+        uses: zhanglongfei001/aliyun-cli-action@v1
+        with:
+          aliyun_access_key_id: ${{ secrets.ALIYUN_ACCESS_KEY_ID }}
+          aliyun_access_key_secret: ${{ secrets.ALIYUN_ACCESS_KEY_SECRET }}
+
+      - name: Deploy GitLab
+        run: |
+          node gitlab-deploy.js \
+            --environment ${{ github.event.inputs.environment || 'test' }} \
+            --version ${{ needs.pre-check.outputs.gitlab_version }} \
+            --strategy ${{ github.event.inputs.deployment_strategy || 'rolling' }}
+        env:
+          ALIYUN_ACCESS_KEY_ID: ${{ secrets.ALIYUN_ACCESS_KEY_ID }}
+          ALIYUN_ACCESS_KEY_SECRET: ${{ secrets.ALIYUN_ACCESS_KEY_SECRET }}
+          SSH_PRIVATE_KEY: ${{ secrets.SSH_PRIVATE_KEY }}
+
+      - name: Upload deployment logs
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: deployment-logs
+          path: logs/
+          retention-days: 7
+
+  # ---------------------------------------------------------------------------
+  # 6. 健康检查
+  # ---------------------------------------------------------------------------
+  health-check:
+    name: Health Check
+    runs-on: ubuntu-latest
+    needs: [deploy-gitlab]
+    environment: ${{ github.event.inputs.environment || 'test' }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Wait for GitLab to be ready
+        run: |
+          echo "等待 GitLab 启动..."
+          # 获取 GitLab URL（从 infrastructure output 或环境变量）
+          GITLAB_URL="${{ vars.GITLAB_URL || 'http://your-gitlab-url.com' }}"
+
+          # 最多等待 10 分钟
+          for i in {1..60}; do
+            if curl -s -o /dev/null -w "%{http_code}" "$GITLAB_URL" | grep -q "200\|302"; then
+              echo "GitLab is ready!"
+              exit 0
+            fi
+            echo "Waiting... ($i/60)"
+            sleep 10
+          done
+
+          echo "GitLab failed to start"
+          exit 1
+
+      - name: Verify GitLab API
+        run: |
+          GITLAB_URL="${{ vars.GITLAB_URL || 'http://your-gitlab-url.com' }}"
+          curl -s "$GITLAB_URL/api/v4/version" | jq .
+
+  # ---------------------------------------------------------------------------
+  # 7. 通知
+  # ---------------------------------------------------------------------------
+  notify:
+    name: Notify Deployment Result
+    runs-on: ubuntu-latest
+    needs: [health-check]
+    if: always()
+    steps:
+      - name: Send DingTalk notification
+        uses: zhanglongfei001/dingtalk-action@v1
+        with:
+          webhook: ${{ secrets.DINGTALK_WEBHOOK }}
+          message: |
+            ## GitLab 部署${{ needs.health-check.result }}
+
+            - 环境：${{ github.event.inputs.environment || 'test' }}
+            - 时间：${{ github.event.repository.updated_at }}
+            - 操作人：${{ github.actor }}
+            - 结果：${{ needs.health-check.result }}

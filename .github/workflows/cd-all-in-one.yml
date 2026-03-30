@@ -1,0 +1,347 @@
+# =============================================================================
+# CD 流水线 - All-in-One 快速部署
+# =============================================================================
+# 最简部署方案：单台 ECS 部署 GitLab（适合个人学习/测试）
+# 成本：约 ¥270/月
+# =============================================================================
+
+name: CD - GitLab All-in-One Deploy
+
+on:
+  # 手动触发
+  workflow_dispatch:
+    inputs:
+      ecs_instance_type:
+        description: 'ECS 实例规格 (默认：ecs.g6.large)'
+        required: true
+        default: 'ecs.g6.large'
+        type: choice
+        options:
+          - ecs.g6.large (2vCPU 4GB, ¥162/月)
+          - ecs.g6.xlarge (4vCPU 8GB, ¥324/月)
+          - ecs.c6.xlarge (4vCPU 8GB, ¥299/月)
+      gitlab_version:
+        description: 'GitLab 版本'
+        required: false
+        default: 'latest'
+      disk_size:
+        description: '系统盘大小 (GB)'
+        required: true
+        default: '100'
+      auto_backup:
+        description: '配置自动备份'
+        required: true
+        default: 'true'
+        type: boolean
+
+env:
+  ALIYUN_REGION: cn-hangzhou
+  ALIYUN_ZONE: cn-hangzhou-i
+
+jobs:
+  # ---------------------------------------------------------------------------
+  # 1. 创建 ECS 实例
+  # ---------------------------------------------------------------------------
+  create-ecs:
+    name: Create ECS Instance
+    runs-on: ubuntu-latest
+    environment: all-in-one
+    outputs:
+      ecs_ip: ${{ steps.create.outputs.public_ip }}
+      ecs_id: ${{ steps.create.outputs.instance_id }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Aliyun CLI
+        uses: zhanglongfei001/aliyun-cli-action@v1
+        with:
+          aliyun_access_key_id: ${{ secrets.ALIYUN_ACCESS_KEY_ID }}
+          aliyun_access_key_secret: ${{ secrets.ALIYUN_ACCESS_KEY_SECRET }}
+          aliyun_region: ${{ env.ALIYUN_REGION }}
+
+      - name: Create VPC
+        id: vpc
+        run: |
+          VPC_ID=$(aliyun vpc CreateVpc \
+            --RegionId ${{ env.ALIYUN_REGION }} \
+            --VpcName gitlab-aio-vpc \
+            --CidrBlock 172.16.0.0/16 \
+            --Description "GitLab All-in-One VPC" \
+            | jq -r '.VpcId')
+          echo "vpc_id=$VPC_ID" >> $GITHUB_OUTPUT
+          echo "Created VPC: $VPC_ID"
+
+      - name: Create VSwitch
+        id: vswitch
+        run: |
+          VSWITCH_ID=$(aliyun vpc CreateVSwitch \
+            --RegionId ${{ env.ALIYUN_REGION }} \
+            --VpcId ${{ steps.vpc.outputs.vpc_id }} \
+            --ZoneId ${{ env.ALIYUN_ZONE }} \
+            --VswitchName gitlab-aio-vswitch \
+            --CidrBlock 172.16.1.0/24 \
+            | jq -r '.VSwitchId')
+          echo "vswitch_id=$VSWITCH_ID" >> $GITHUB_OUTPUT
+          echo "Created VSwitch: $VSWITCH_ID"
+
+      - name: Create Security Group
+        id: sg
+        run: |
+          SG_ID=$(aliyun ecs CreateSecurityGroup \
+            --RegionId ${{ env.ALIYUN_REGION }} \
+            --VpcId ${{ steps.vpc.outputs.vpc_id }} \
+            --SecurityGroupName gitlab-aio-sg \
+            --Description "GitLab All-in-One Security Group" \
+            | jq -r '.SecurityGroupId')
+          echo "sg_id=$SG_ID" >> $GITHUB_OUTPUT
+          echo "Created Security Group: $SG_ID"
+
+      - name: Add Security Group Rules
+        run: |
+          SG_ID=${{ steps.sg.outputs.sg_id }}
+
+          # HTTP
+          aliyun ecs AuthorizeSecurityGroup \
+            --SecurityGroupId $SG_ID \
+            --IpProtocol tcp \
+            --PortRange 80/80 \
+            --SourceCidrIp 0.0.0.0/0 \
+            --Description "HTTP access"
+
+          # HTTPS
+          aliyun ecs AuthorizeSecurityGroup \
+            --SecurityGroupId $SG_ID \
+            --IpProtocol tcp \
+            --PortRange 443/443 \
+            --SourceCidrIp 0.0.0.0/0 \
+            --Description "HTTPS access"
+
+          # SSH (建议限制 IP)
+          aliyun ecs AuthorizeSecurityGroup \
+            --SecurityGroupId $SG_ID \
+            --IpProtocol tcp \
+            --PortRange 22/22 \
+            --SourceCidrIp 0.0.0.0/0 \
+            --Description "SSH access"
+
+      - name: Create ECS Instance
+        id: create
+        run: |
+          # 解析实例规格
+          INSTANCE_TYPE=$(echo "${{ github.event.inputs.ecs_instance_type }}" | cut -d' ' -f1)
+
+          INSTANCE_ID=$(aliyun ecs RunInstances \
+            --ImageId ubuntu-22-04-v2024* \
+            --InstanceType $INSTANCE_TYPE \
+            --SecurityGroupId ${{ steps.sg.outputs.sg_id }} \
+            --VSwitchId ${{ steps.vswitch.outputs.vswitch_id }} \
+            --InstanceName gitlab-aio-instance \
+            --SystemDiskCategory cloud_essd \
+            --SystemDiskSize ${{ github.event.inputs.disk_size }} \
+            --InternetChargeType PayByTraffic \
+            --InternetMaxBandwidthOut 5 \
+            --UserData "$(base64 -w0 scripts/install-gitlab-test.sh)" \
+            --Amount 1 \
+            | jq -r '.InstanceIds.InstanceId[0]')
+
+          echo "instance_id=$INSTANCE_ID" >> $GITHUB_OUTPUT
+          echo "Created ECS: $INSTANCE_ID"
+
+      - name: Wait for ECS to be running
+        run: |
+          INSTANCE_ID=${{ steps.create.outputs.instance_id }}
+          echo "Waiting for ECS to start..."
+
+          for i in {1..30}; do
+            STATUS=$(aliyun ecs DescribeInstances \
+              --RegionId ${{ env.ALIYUN_REGION }} \
+              --InstanceIds "[\"$INSTANCE_ID\"]" \
+              | jq -r '.Instances.Instance[0].Status')
+
+            if [ "$STATUS" = "Running" ]; then
+              echo "ECS is running!"
+              break
+            fi
+
+            echo "Status: $STATUS ($i/30)"
+            sleep 10
+          done
+
+      - name: Get ECS Public IP
+        id: ip
+        run: |
+          INSTANCE_ID=${{ steps.create.outputs.instance_id }}
+          PUBLIC_IP=$(aliyun ecs DescribeInstances \
+            --RegionId ${{ env.ALIYUN_REGION }} \
+            --InstanceIds "[\"$INSTANCE_ID\"]" \
+            | jq -r '.Instances.Instance[0].PublicIpAddress.IpAddress[0]')
+
+          echo "public_ip=$PUBLIC_IP" >> $GITHUB_OUTPUT
+          echo "::notice::ECS 公网 IP: $PUBLIC_IP"
+
+      - name: Save infrastructure info
+        run: |
+          cat > infrastructure-info.json << EOF
+          {
+            "ecs_id": "${{ steps.create.outputs.instance_id }}",
+            "ecs_ip": "${{ steps.ip.outputs.public_ip }}",
+            "vpc_id": "${{ steps.vpc.outputs.vpc_id }}",
+            "vswitch_id": "${{ steps.vswitch.outputs.vswitch_id }}",
+            "security_group_id": "${{ steps.sg.outputs.sg_id }}",
+            "created_at": "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+          }
+          EOF
+
+      - name: Upload infrastructure info
+        uses: actions/upload-artifact@v4
+        with:
+          name: infrastructure-info
+          path: infrastructure-info.json
+          retention-days: 30
+
+  # ---------------------------------------------------------------------------
+  # 2. 安装 GitLab
+  # ---------------------------------------------------------------------------
+  install-gitlab:
+    name: Install GitLab
+    runs-on: ubuntu-latest
+    needs: [create-ecs]
+    environment: all-in-one
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Download infrastructure info
+        uses: actions/download-artifact@v4
+        with:
+          name: infrastructure-info
+
+      - name: Setup SSH
+        run: |
+          mkdir -p ~/.ssh
+          echo "${{ secrets.SSH_PRIVATE_KEY }}" > ~/.ssh/id_rsa
+          chmod 600 ~/.ssh/id_rsa
+          ssh-keyscan -H ${{ needs.create-ecs.outputs.ecs_ip }} >> ~/.ssh/known_hosts
+
+      - name: Wait for SSH to be ready
+        run: |
+          echo "Waiting for SSH..."
+          for i in {1..30}; do
+            if ssh -o ConnectTimeout=5 -o StrictHostKeyChecking=no root@${{ needs.create-ecs.outputs.ecs_ip }} "echo 'SSH ready'" 2>/dev/null; then
+              echo "SSH is ready!"
+              break
+            fi
+            echo "Waiting... ($i/30)"
+            sleep 10
+          done
+
+      - name: Copy installation script
+        run: |
+          scp -o StrictHostKeyChecking=no scripts/install-gitlab-test.sh \
+            root@${{ needs.create-ecs.outputs.ecs_ip }}:/root/
+
+      - name: Install GitLab
+        run: |
+          ssh -o StrictHostKeyChecking=no root@${{ needs.create-ecs.outputs.ecs_ip }} << 'EOF'
+            chmod +x /root/install-gitlab-test.sh
+            /root/install-gitlab-test.sh 2>&1 | tee /root/gitlab-install.log
+          EOF
+
+      - name: Wait for GitLab to be ready
+        run: |
+          echo "Waiting for GitLab to start..."
+          for i in {1..60}; do
+            HTTP_CODE=$(ssh -o StrictHostKeyChecking=no root@${{ needs.create-ecs.outputs.ecs_ip }} \
+              "curl -s -o /dev/null -w '%{http_code}' http://localhost/" 2>/dev/null || echo "000")
+
+            if [ "$HTTP_CODE" = "200" ] || [ "$HTTP_CODE" = "302" ]; then
+              echo "GitLab is ready! (HTTP: $HTTP_CODE)"
+              break
+            fi
+
+            echo "HTTP: $HTTP_CODE ($i/60)"
+            sleep 10
+          done
+
+      - name: Get GitLab initial password
+        run: |
+          echo "::notice::获取 GitLab 初始密码："
+          ssh -o StrictHostKeyChecking=no root@${{ needs.create-ecs.outputs.ecs_ip }} \
+            "cat /etc/gitlab/initial_root_password 2>/dev/null || echo '请在 /etc/gitlab/initial_root_password 查看'"
+
+  # ---------------------------------------------------------------------------
+  # 3. 配置备份 (可选)
+  # ---------------------------------------------------------------------------
+  configure-backup:
+    name: Configure Backup
+    runs-on: ubuntu-latest
+    needs: [install-gitlab]
+    if: ${{ github.event.inputs.auto_backup == 'true' }}
+    environment: all-in-one
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Download infrastructure info
+        uses: actions/download-artifact@v4
+        with:
+          name: infrastructure-info
+
+      - name: Setup SSH
+        run: |
+          mkdir -p ~/.ssh
+          echo "${{ secrets.SSH_PRIVATE_KEY }}" > ~/.ssh/id_rsa
+          chmod 600 ~/.ssh/id_rsa
+
+      - name: Copy backup script
+        run: |
+          scp -o StrictHostKeyChecking=no scripts/backup-test-env.sh \
+            root@${{ needs.create-ecs.outputs.ecs_ip }}:/root/
+
+      - name: Configure cron backup
+        run: |
+          ssh -o StrictHostKeyChecking=no root@${{ needs.create-ecs.outputs.ecs_ip }} << 'EOF'
+            # 创建备份目录
+            mkdir -p /root/backups
+
+            # 配置 crontab (每天凌晨 2 点备份)
+            (crontab -l 2>/dev/null; echo "0 2 * * * /root/backup-test-env.sh >> /var/log/gitlab-backup.log 2>&1") | crontab -
+
+            echo "Backup configured!"
+            crontab -l
+          EOF
+
+  # ---------------------------------------------------------------------------
+  # 4. 输出访问信息
+  # ---------------------------------------------------------------------------
+  output-info:
+    name: Deployment Summary
+    runs-on: ubuntu-latest
+    needs: [install-gitlab]
+    steps:
+      - name: Download infrastructure info
+        uses: actions/download-artifact@v4
+        with:
+          name: infrastructure-info
+
+      - name: Display summary
+        run: |
+          echo "## 🎉 GitLab All-in-One 部署完成！"
+          echo ""
+          echo "### 访问信息"
+          echo "- URL: http://${{ needs.create-ecs.outputs.ecs_ip }}"
+          echo "- 用户名：root"
+          echo "- 密码：查看上一步的 'Get GitLab initial password'"
+          echo ""
+          echo "### 资源信息"
+          cat infrastructure-info.json | jq .
+          echo ""
+          echo "### 成本估算"
+          echo "- ECS: ¥162-324/月 (取决于实例规格)"
+          echo "- 带宽：按流量计费"
+          echo ""
+          echo "### 下一步"
+          echo "1. 访问 GitLab 并重置密码"
+          echo "2. 配置域名和 SSL 证书（可选）"
+          echo "3. 配置邮件通知（可选）"
